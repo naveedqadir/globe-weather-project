@@ -1,0 +1,639 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Globe Weather - Interactive 3D Weather Explorer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            animation: {
+              'fade-in': 'fadeIn 0.5s ease-in-out',
+              'slide-up': 'slideUp 0.3s ease-out',
+              'pulse-soft': 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+            },
+            backdropBlur: {
+              'xs': '2px',
+            }
+          }
+        }
+      }
+    </script>
+    <link href="https://cdn.jsdelivr.net/npm/cesium@1.121.0/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+    <script defer src="https://cdn.jsdelivr.net/npm/cesium@1.121.0/Build/Cesium/Cesium.js?v=121"></script>
+    <style>
+      @keyframes fadeIn {
+        from { opacity: 0; }
+        to { opacity: 1; }
+      }
+      @keyframes slideUp {
+        from { opacity: 0; transform: translateY(10px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+      .glass-morphism {
+        background: rgba(15, 23, 42, 0.7);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+      }
+      .info-card {
+        background: linear-gradient(135deg, rgba(15, 23, 42, 0.9) 0%, rgba(30, 41, 59, 0.8) 100%);
+        backdrop-filter: blur(16px);
+        -webkit-backdrop-filter: blur(16px);
+      }
+      /* Responsive Cesium container */
+      @media (max-width: 640px) {
+        #cesiumContainer {
+          height: 60vh !important;
+        }
+      }
+    </style>
+  </head>
+  <body class="bg-gradient-to-br from-slate-900 via-blue-900 to-indigo-900 text-slate-100 overflow-x-hidden">
+    <div id="app" class="min-h-screen animate-fade-in">
+      <!-- Enhanced Top Navigation Bar -->
+      <nav class="sticky top-0 z-50 glass-morphism border-b border-white/10">
+        <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+          <div class="flex h-16 items-center justify-between">
+            <!-- Brand -->
+            <div class="flex items-center space-x-3">
+              <div class="relative">
+                <div class="h-8 w-8 rounded-full bg-gradient-to-r from-blue-400 to-indigo-500 animate-pulse-soft"></div>
+                <div class="absolute inset-0 h-8 w-8 rounded-full bg-gradient-to-r from-blue-400 to-indigo-500 opacity-75 blur-sm"></div>
+              </div>
+              <div>
+                <h1 class="text-lg font-semibold bg-gradient-to-r from-white to-blue-200 bg-clip-text text-transparent">
+                  Globe Weather
+                </h1>
+                <p class="hidden text-xs text-slate-300 sm:block">Interactive 3D Weather Explorer</p>
+              </div>
+            </div>
+
+            <!-- Search Section -->
+            <div class="flex items-center space-x-3">
+              <div class="relative flex items-center">
+                <div class="flex overflow-hidden rounded-lg border border-white/20 bg-white/5 backdrop-blur-sm">
+                  <input 
+                    id="searchBox" 
+                    type="text" 
+                    placeholder="Search places..."
+                    class="w-48 bg-transparent px-3 py-2 text-sm placeholder-slate-400 outline-none focus:ring-0 sm:w-64 lg:w-80" 
+                  />
+                  <button 
+                    id="searchBtn" 
+                    class="bg-gradient-to-r from-indigo-500 to-blue-600 px-4 py-2 text-sm font-medium text-white transition-all hover:from-indigo-600 hover:to-blue-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <span class="hidden sm:inline">Search</span>
+                    <svg class="h-4 w-4 sm:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+                    </svg>
+                  </button>
+                </div>
+                
+                <!-- Loading Spinner -->
+                <div id="loadingSpinner" class="ml-3 hidden">
+                  <svg class="h-5 w-5 animate-spin text-indigo-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+                  </svg>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </nav>
+
+      <!-- Main Content -->
+      <main class="relative">
+        <!-- Hero Section -->
+        <div class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+          <div class="text-center">
+            <p class="text-sm text-slate-300 sm:text-base">
+              Click anywhere on the globe to explore weather conditions • Drag to rotate • Scroll to zoom
+            </p>
+          </div>
+        </div>
+
+        <!-- Globe Container -->
+        <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+          <div class="relative overflow-hidden rounded-2xl border border-white/10 bg-black/20 shadow-2xl">
+            <div id="cesiumContainer" class="h-[70vh] w-full sm:h-[75vh] lg:h-[80vh]"></div>
+            
+            <!-- Overlay Elements -->
+            <div class="absolute inset-0 pointer-events-none">
+              <!-- Weather Info Card -->
+              <div id="info" class="info-card pointer-events-auto absolute left-4 top-4 hidden max-w-xs animate-slide-up rounded-xl border border-white/20 p-4 shadow-xl sm:max-w-sm">
+                <div class="space-y-2">
+                  <div class="flex items-center justify-between">
+                    <h3 class="font-semibold text-white">Weather Info</h3>
+                    <button id="closeInfo" class="text-slate-300 hover:text-white">
+                      <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                      </svg>
+                    </button>
+                  </div>
+                  <pre id="infoContent" class="whitespace-pre-wrap text-sm text-slate-200"></pre>
+                  <!-- Debug content removed -->
+                </div>
+              </div>
+              
+              <!-- Debug panel removed -->
+              
+              <!-- Toast Notifications -->
+              <div id="toast" class="pointer-events-auto absolute left-1/2 top-4 hidden -translate-x-1/2 animate-slide-up rounded-lg bg-red-500/90 px-4 py-2 text-sm font-medium text-white shadow-lg backdrop-blur-sm"></div>
+              
+              <!-- Success Toast -->
+              <div id="successToast" class="pointer-events-auto absolute left-1/2 top-4 hidden -translate-x-1/2 animate-slide-up rounded-lg bg-green-500/90 px-4 py-2 text-sm font-medium text-white shadow-lg backdrop-blur-sm"></div>
+
+              <!-- local time badge removed per UX request -->
+            </div>
+          </div>
+        </div>
+
+        <!-- Tips Section -->
+        <div class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+          <div class="rounded-xl bg-white/5 p-6 backdrop-blur-sm">
+            <h2 class="mb-3 text-lg font-semibold text-white">How to Use</h2>
+            <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div class="flex items-center space-x-3">
+                <div class="flex h-8 w-8 items-center justify-center rounded-full bg-blue-500/20">
+                  <svg class="h-4 w-4 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.122 2.122"></path>
+                  </svg>
+                </div>
+                <span class="text-sm text-slate-300">Click to get weather & audio</span>
+              </div>
+              <div class="flex items-center space-x-3">
+                <div class="flex h-8 w-8 items-center justify-center rounded-full bg-green-500/20">
+                  <svg class="h-4 w-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+                  </svg>
+                </div>
+                <span class="text-sm text-slate-300">Search for specific locations</span>
+              </div>
+              <div class="flex items-center space-x-3">
+                <div class="flex h-8 w-8 items-center justify-center rounded-full bg-purple-500/20">
+                  <svg class="h-4 w-4 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 4V2a1 1 0 011-1h4a1 1 0 011 1v2m3 0V2a1 1 0 011-1h4a1 1 0 011 1v2"></path>
+                  </svg>
+                </div>
+                <span class="text-sm text-slate-300">Drag to rotate & scroll to zoom</span>
+              </div>
+              <div class="flex items-center space-x-3">
+                <div class="flex h-8 w-8 items-center justify-center rounded-full bg-yellow-500/20">
+                  <svg class="h-4 w-4 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                  </svg>
+                </div>
+                <span class="text-sm text-slate-300">Press F12 for debug info</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <script>
+      window.addEventListener('load', () => {
+        const info = document.getElementById('info');
+        const searchBox = document.getElementById('searchBox');
+        const searchBtn = document.getElementById('searchBtn');
+        const token = "{{ cesium_token }}";
+        if (token && window.Cesium && Cesium.Ion) {
+          Cesium.Ion.defaultAccessToken = token;
+        }
+
+        const viewer = new Cesium.Viewer('cesiumContainer', {
+          animation: false,
+          timeline: false,
+          baseLayerPicker: true,
+          geocoder: false,
+          homeButton: true,
+          sceneModePicker: false,
+          navigationHelpButton: false,
+          fullscreenButton: false,
+        });
+
+        const layers = viewer.imageryLayers;
+        if (!token) {
+          // Fallback to OSM (labels embedded) when no Ion token is set
+          try { layers.remove(layers.get(0)); } catch (e) {}
+          layers.addImageryProvider(new Cesium.OpenStreetMapImageryProvider({ url: 'https://tile.openstreetmap.org/' }));
+        }
+        // If Ion token is present, prefer a labeled imagery style via the built-in base layer picker models
+        const picker = viewer.baseLayerPicker;
+        if (token && picker && picker.viewModel && Array.isArray(picker.viewModel.imageryProviderViewModels)) {
+          const models = picker.viewModel.imageryProviderViewModels;
+          const withLabels = models.find(m => /Aerial with Labels/i.test(m.name) || /Bing Maps Aerial with Labels/i.test(m.name));
+          if (withLabels) {
+            picker.viewModel.selectedImagery = withLabels;
+          }
+        }
+
+  // Keep Cesium default toolbar position (top-right). No overrides applied.
+
+        // Enhanced UI interaction functions
+        const spinner = document.getElementById('loadingSpinner');
+        const toast = document.getElementById('toast');
+        const successToast = document.getElementById('successToast');
+  const infoCard = document.getElementById('info');
+  const infoContent = document.getElementById('infoContent');
+  const closeInfoBtn = document.getElementById('closeInfo');
+        
+  // Debug logging system removed
+        
+        function showSpinner(show) { 
+          spinner.classList.toggle('hidden', !show); 
+          if (show) spinner.classList.add('animate-spin');
+          else spinner.classList.remove('animate-spin');
+        }
+        
+        function showToast(msg, isError = true) {
+          const targetToast = isError ? toast : successToast;
+          targetToast.textContent = msg;
+          targetToast.classList.remove('hidden');
+          targetToast.classList.add('animate-slide-up');
+          setTimeout(() => {
+            targetToast.classList.add('hidden');
+            targetToast.classList.remove('animate-slide-up');
+          }, 3000);
+        }
+        
+        function showInfoCard(content) {
+          infoContent.textContent = content;
+          infoCard.classList.remove('hidden');
+          infoCard.classList.add('animate-slide-up');
+        }
+        
+        function hideInfoCard() {
+          infoCard.classList.add('hidden');
+          infoCard.classList.remove('animate-slide-up');
+        }
+        
+        closeInfoBtn.addEventListener('click', hideInfoCard);
+
+        // Keep a single marker for current selection/search using a custom modern pin
+        let currentPoint = null;
+        
+        function createModernPin() {
+          const canvas = document.createElement('canvas');
+          const size = 48;
+          canvas.width = size;
+          canvas.height = size;
+          const ctx = canvas.getContext('2d');
+          
+          // Create gradient
+          const gradient = ctx.createLinearGradient(0, 0, 0, size);
+          gradient.addColorStop(0, '#3b82f6'); // blue-500
+          gradient.addColorStop(1, '#1d4ed8'); // blue-700
+          
+          // Draw shadow
+          ctx.shadowColor = 'rgba(0, 0, 0, 0.3)';
+          ctx.shadowBlur = 8;
+          ctx.shadowOffsetX = 2;
+          ctx.shadowOffsetY = 4;
+          
+          // Draw pin body (teardrop shape)
+          const centerX = size / 2;
+          const centerY = size * 0.35;
+          const radius = size * 0.2;
+          
+          ctx.beginPath();
+          ctx.arc(centerX, centerY, radius, 0, 2 * Math.PI);
+          ctx.lineTo(centerX, size * 0.85);
+          ctx.closePath();
+          ctx.fillStyle = gradient;
+          ctx.fill();
+          
+          // Reset shadow for inner elements
+          ctx.shadowColor = 'transparent';
+          
+          // Draw inner circle (white dot)
+          ctx.beginPath();
+          ctx.arc(centerX, centerY, radius * 0.4, 0, 2 * Math.PI);
+          ctx.fillStyle = 'white';
+          ctx.fill();
+          
+          // Add subtle border
+          ctx.beginPath();
+          ctx.arc(centerX, centerY, radius, 0, 2 * Math.PI);
+          ctx.lineTo(centerX, size * 0.85);
+          ctx.closePath();
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+          
+          return canvas.toDataURL();
+        }
+        
+        async function setMarker(lat, lon, labelText) {
+          if (currentPoint) viewer.entities.remove(currentPoint);
+          
+          currentPoint = viewer.entities.add({
+            position: Cesium.Cartesian3.fromDegrees(lon, lat),
+            billboard: {
+              image: createModernPin(),
+              verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+              heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+              scale: 1.2,
+              scaleByDistance: new Cesium.NearFarScalar(1000, 1.2, 100000, 0.8)
+            },
+            label: {
+              text: labelText || '',
+              font: '14px ui-sans-serif, system-ui, -apple-system, sans-serif',
+              pixelOffset: new Cesium.Cartesian2(0, -65),
+              fillColor: Cesium.Color.WHITE,
+              showBackground: true,
+              backgroundColor: new Cesium.Color(15/255, 23/255, 42/255, 0.9),
+              backgroundPadding: new Cesium.Cartesian2(8, 6),
+              outlineWidth: 0,
+              horizontalOrigin: Cesium.HorizontalOrigin.CENTER,
+              verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+              heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+              disableDepthTestDistance: Number.POSITIVE_INFINITY
+            }
+          });
+        }
+
+  const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
+        handler.setInputAction(async (click) => {
+          const scene = viewer.scene;
+          const ellipsoid = scene.globe.ellipsoid;
+          let cartesian = null;
+
+          if (scene.pickPositionSupported) {
+            cartesian = scene.pickPosition(click.position);
+          }
+          if (!Cesium.defined(cartesian)) {
+            cartesian = viewer.camera.pickEllipsoid(click.position, ellipsoid);
+          }
+          if (!Cesium.defined(cartesian)) return;
+
+          const carto = Cesium.Cartographic.fromCartesian(cartesian);
+          const lat = Cesium.Math.toDegrees(carto.latitude);
+          const lon = Cesium.Math.toDegrees(carto.longitude);
+
+          // Drop a marker immediately
+          setMarker(lat, lon, `${lat.toFixed(2)}, ${lon.toFixed(2)}`);
+
+          try {
+            showSpinner(true);
+            // Use /api/geocode to get a local name for the clicked coordinates
+            const geoResp = await fetch(`/api/geocode?q=${lat},${lon}`);
+            let geo = null;
+            if (geoResp.ok) {
+              geo = await geoResp.json();
+            }
+
+            const search_name = geo && geo.name ? geo.name : null;
+
+            const weatherPayload = { lat, lon };
+            if (search_name) weatherPayload.search_name = search_name;
+
+            const r = await fetch('/api/weather', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(weatherPayload) });
+            const data = await r.json();
+
+            if (data.error) { 
+              showInfoCard(`Error: ${data.error}`); 
+              showToast(data.error, true); 
+              return; 
+            }
+
+            // Compute the formatted timestamp once so display and speech match exactly
+            const formattedTimestamp = formatLocalTimestamp(data);
+            const text = buildWeatherSpeech(data, lat, lon, formattedTimestamp);
+            const formattedInfo = formatWeatherInfo(data, lat, lon, formattedTimestamp);
+
+            showInfoCard(formattedInfo);
+            // No top-right badge; info card shows the detailed timestamp already
+            showToast('Weather data loaded successfully!', false);
+
+            // Update marker label with resolved place name if available
+            if (currentPoint && data) {
+              const lbl = data.name ? `${data.name}${data.country ? ', ' + data.country : ''}` : `${lat.toFixed(2)}, ${lon.toFixed(2)}`;
+              currentPoint.label.text = lbl;
+            }
+            // Stop any existing ambient sound before playing new weather
+            stopAmbientAudio();
+            await playTTS(text, data.weather);
+          } catch (e) {
+            showInfoCard(`Error: ${e}`);
+            showToast('Failed to fetch weather', true);
+          } finally {
+            showSpinner(false);
+          }
+        }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+
+        async function flyToPlace(q) {
+          if (!q) return;
+          try {
+            showSpinner(true);
+            const r = await fetch(`/api/geocode?q=${encodeURIComponent(q)}`);
+            const geo = await r.json();
+            if (!r.ok) { 
+              showInfoCard(geo.error || 'No results found'); 
+              showToast(geo.error || 'No results found', true); 
+              return; 
+            }
+            const lat = geo.lat, lon = geo.lon;
+            // Mark searched location and fly closer
+            await setMarker(lat, lon, geo.name || q);
+            showToast(`Flying to ${geo.name || q}...`, false);
+            viewer.camera.flyTo({
+              destination: Cesium.Cartesian3.fromDegrees(lon, lat, 40000),
+              duration: 1.8,
+              easingFunction: Cesium.EasingFunction.CUBIC_IN_OUT
+            });
+            // Pre-fetch weather and speak, passing the geocoded name for accuracy
+            const weatherPayload = {
+              lat: lat,
+              lon: lon,
+              search_name: geo.name || q  // Pass the geocoded name to preserve location accuracy
+            };
+            const wr = await fetch('/api/weather', { 
+              method: 'POST', 
+              headers: { 'Content-Type': 'application/json' }, 
+              body: JSON.stringify(weatherPayload) 
+            });
+            const data = await wr.json();
+              if (data && !data.error) {
+              // Compute timestamp once to keep UI and TTS identical
+              const formattedTimestamp = formatLocalTimestamp(data);
+              const text = buildWeatherSpeech(data, lat, lon, formattedTimestamp);
+              const formattedInfo = formatWeatherInfo(data, lat, lon, formattedTimestamp);
+              showInfoCard(formattedInfo);
+              // No top-right badge
+              if (currentPoint) {
+                const lbl = data.name ? `${data.name}${data.country ? ', ' + data.country : ''}` : (geo.name || q);
+                currentPoint.label.text = lbl;
+              }
+              // Stop any existing ambient sound before playing new weather
+              stopAmbientAudio();
+              await playTTS(text, data.weather);
+            }
+          } catch (e) {
+            showInfoCard(`Error: ${e}`);
+            showToast('Search failed', true);
+          } finally {
+            showSpinner(false);
+          }
+        }
+
+  // localTimeBadge and updater removed per request
+        
+
+        searchBtn.addEventListener('click', () => {
+          const query = searchBox.value.trim();
+          if (query) flyToPlace(query);
+        });
+        searchBox.addEventListener('keydown', (e) => { 
+          if (e.key === 'Enter') {
+            const query = searchBox.value.trim();
+            if (query) flyToPlace(query);
+          }
+        });
+
+        // Enhanced keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+          if (e.key === 'Escape') {
+            hideInfoCard();
+          }
+          if (e.key === '/' && e.target !== searchBox) {
+            e.preventDefault();
+            searchBox.focus();
+          }
+        });
+
+        function buildWeatherSpeech(d, lat, lon, formattedTimestamp = null) {
+          const loc = d.name ? `${d.name}, ${d.country || ''}` : `lat ${lat.toFixed(2)}, lon ${lon.toFixed(2)}`;
+          const temp = d.temp_c != null ? `${Math.round(d.temp_c)} degrees Celsius` : 'unknown temperature';
+          const desc = d.weather || 'weather unavailable';
+          const wind = d.wind_speed != null ? `Wind ${Math.round(d.wind_speed)} meters per second.` : '';
+          // Use provided formattedTimestamp if available, otherwise compute
+          if (!formattedTimestamp) formattedTimestamp = formatLocalTimestamp(d);
+          const localTimeSpeech = formattedTimestamp ? `Local time is ${formattedTimestamp}. ` : '';
+          return `Weather for ${loc}. ${localTimeSpeech}${desc}. Temperature ${temp}. ${wind}`;
+        }
+
+        function formatWeatherInfo(d, lat, lon, formattedTimestamp = null) {
+          const location = d.name ? `${d.name}${d.country ? ', ' + d.country : ''}` : `${lat.toFixed(3)}°, ${lon.toFixed(3)}°`;
+          const temperature = d.temp_c != null ? `${Math.round(d.temp_c)}°C` : 'N/A';
+          const condition = d.weather || 'Unknown';
+          const humidity = d.humidity != null ? `${d.humidity}%` : 'N/A';
+          const windSpeed = d.wind_speed != null ? `${Math.round(d.wind_speed)} m/s` : 'N/A';
+          // Timezone / local time display (use same helper as speech)
+          if (!formattedTimestamp) formattedTimestamp = formatLocalTimestamp(d);
+          const tzLine = formattedTimestamp ? `🕒 ${formattedTimestamp}` : '';
+
+          return `📍 ${location}\n${tzLine ? tzLine + '\n' : ''}🌤️ ${condition}\n🌡️ ${temperature}\n💧 Humidity: ${humidity}\n💨 Wind: ${windSpeed}`;
+        }
+
+        // Helper: return formatted local timestamp string matching info card format
+        // Returns: 'DD/MM/YYYY, HH:MM:SS (UTC±HH:MM)' or 'DD/MM/YYYY, HH:MM:SS (ZoneName)'
+        function formatLocalTimestamp(d) {
+          try {
+            if (d.local_time) {
+              // d.local_time is an ISO string representing the local time in the target zone
+              // Parse it directly to avoid the browser converting it to the client's local timezone.
+              // Expected ISO formats: 2025-08-24T09:02:53-06:00 or with trailing Z
+              const iso = String(d.local_time);
+              const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})?$/);
+              if (m) {
+                const yyyy = m[1], mm = m[2], dd = m[3], hh = m[4], min = m[5], ss = m[6], tzPart = m[7];
+                if (d.timezone) return `${dd}/${mm}/${yyyy}, ${hh}:${min}:${ss} (${d.timezone})`;
+                if (tzPart && tzPart !== 'Z') {
+                  // tzPart is like +05:30 or -06:00
+                  return `${dd}/${mm}/${yyyy}, ${hh}:${min}:${ss} (UTC${tzPart})`;
+                }
+                if (d.utc_offset_seconds != null) {
+                  const totalSeconds = d.utc_offset_seconds;
+                  const sign = totalSeconds >= 0 ? '+' : '-';
+                  const absSeconds = Math.abs(totalSeconds);
+                  const oh = String(Math.floor(absSeconds / 3600)).padStart(2, '0');
+                  const om = String(Math.floor((absSeconds % 3600) / 60)).padStart(2, '0');
+                  return `${dd}/${mm}/${yyyy}, ${hh}:${min}:${ss} (UTC${sign}${oh}:${om})`;
+                }
+                return `${dd}/${mm}/${yyyy}, ${hh}:${min}:${ss}`;
+              }
+              // If parsing failed, fall back to previous behaviors below
+            }
+
+            if (d.timezone) {
+              // Use Intl to format current moment for the given timezone
+              const now = new Date();
+              const fmt = new Intl.DateTimeFormat('en-GB', { timeZone: d.timezone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+              return `${fmt.format(now)} (${d.timezone})`;
+            }
+
+            if (d.utc_offset_seconds != null) {
+              const now = new Date();
+              const nowUtc = now.getTime() + (now.getTimezoneOffset() * 60000);
+              const localMs = nowUtc + (d.utc_offset_seconds * 1000);
+              const localDate = new Date(localMs);
+              const dd = String(localDate.getDate()).padStart(2, '0');
+              const mm = String(localDate.getMonth() + 1).padStart(2, '0');
+              const yyyy = localDate.getFullYear();
+              const hh = String(localDate.getHours()).padStart(2, '0');
+              const min = String(localDate.getMinutes()).padStart(2, '0');
+              const ss = String(localDate.getSeconds()).padStart(2, '0');
+              const totalSeconds = d.utc_offset_seconds;
+              const sign = totalSeconds >= 0 ? '+' : '-';
+              const absSeconds = Math.abs(totalSeconds);
+              const oh = String(Math.floor(absSeconds / 3600)).padStart(2, '0');
+              const om = String(Math.floor((absSeconds % 3600) / 60)).padStart(2, '0');
+              return `${dd}/${mm}/${yyyy}, ${hh}:${min}:${ss} (UTC${sign}${oh}:${om})`;
+            }
+
+            return null;
+          } catch (e) {
+            return null;
+          }
+        }
+
+  // renderInfo and in-browser audio helpers removed (unused)
+        
+  // playAmbientWeatherSound removed (backend ambient API used directly elsewhere)
+        
+        function stopAmbientAudio() {
+          // Call backend to stop ambient sound on Pi
+          fetch('/api/ambient', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'stop' })
+          }).catch(() => {});
+        }
+
+        async function playTTS(text, weatherCondition) {
+          // Only trigger backend TTS playback, do not play audio in browser
+          try {
+            const r = await fetch('/api/tts', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ text, engine: 'pyttsx3' })
+            });
+            const result = await r.json().catch(() => ({}));
+            if (r.ok && result && !result.error) {
+              showToast('🔊 Speaking on device', false);
+            } else {
+              // Try fallback engine
+              const r2 = await fetch('/api/tts', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text, engine: 'gtts' })
+              });
+              const result2 = await r2.json().catch(() => ({}));
+              if (r2.ok && result2 && !result2.error) {
+                showToast('🔊 Speaking (gTTS) on device', false);
+              } else {
+                showToast((result2 && result2.error) || (result && result.error) || 'TTS error', true);
+              }
+            }
+          } catch (e) {
+            showToast('TTS request error', true);
+          }
+        }
+      });
+    </script>
+  </body>
+</html>

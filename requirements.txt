@@ -1,0 +1,6 @@
+Flask==3.0.3
+requests==2.32.3
+gTTS==2.5.3
+pyttsx3==2.98
+geopy==2.4.1
+python-dotenv==1.0.1
