@@ -48,6 +48,37 @@
           height: 60vh !important;
         }
       }
+      /* Suggestions dropdown visual styles (glassy card) */
+      #suggestions { min-width: 14rem; max-width: 36rem; }
+      #suggestions ul { list-style: none; margin: 0; padding: 0.25rem 0; }
+      /* Glass background with subtle gradient border and blur */
+      #suggestions {
+        background: linear-gradient(180deg, rgba(15,23,42,0.72), rgba(8,12,20,0.6));
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        border: 1px solid rgba(255,255,255,0.04);
+        box-shadow: 0 10px 30px rgba(2,6,23,0.6), inset 0 1px 0 rgba(255,255,255,0.02);
+      }
+      .suggestion-item {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 0.5rem; padding: 0.45rem 0.75rem; cursor: pointer;
+        color: #e6eef8; transition: background 120ms ease, transform 90ms ease;
+      }
+      .suggestion-item:hover, .suggestion-item.active {
+        background: linear-gradient(90deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));
+        transform: translateY(-1px);
+      }
+      .suggestion-left { display:flex; flex-direction:column; gap:2px; overflow:hidden }
+      .suggestion-name { font-weight:600; font-size:0.92rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
+      .suggestion-meta { font-size:0.78rem; color: #cbd5e1; opacity: 0.9 }
+      .suggestion-badge { font-size:0.65rem; padding:0.08rem 0.4rem; border-radius:9999px; background:rgba(255,255,255,0.03); color:#e2e8f0; border:1px solid rgba(255,255,255,0.03) }
+      .suggestion-inline-spinner { width:18px; height:18px; display:inline-block; vertical-align:middle }
+      /* Separator between items */
+      #suggestions ul li { border-bottom: 1px solid rgba(255,255,255,0.02); }
+      #suggestions ul li:last-child { border-bottom: none; }
+      /* Custom scrollbar for modern look */
+      #suggestions::-webkit-scrollbar, #suggestions ul::-webkit-scrollbar { height:8px; width:8px }
+      #suggestions::-webkit-scrollbar-thumb, #suggestions ul::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius:999px }
     </style>
   </head>
   <body class="bg-gradient-to-br from-slate-900 via-blue-900 to-indigo-900 text-slate-100 overflow-x-hidden">
@@ -89,6 +120,10 @@
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
                     </svg>
                   </button>
+                </div>
+                <!-- Suggestions dropdown -->
+                <div id="suggestions" class="absolute left-0 top-full mt-1 w-full max-h-60 overflow-auto rounded-md bg-white/5 border border-white/10 shadow-lg hidden z-50">
+                  <ul role="listbox" aria-label="Search suggestions" class="px-1"></ul>
                 </div>
                 
                 <!-- Loading Spinner -->
@@ -191,6 +226,7 @@
         const info = document.getElementById('info');
         const searchBox = document.getElementById('searchBox');
         const searchBtn = document.getElementById('searchBtn');
+  const suggestionsBox = document.getElementById('suggestions');
         const token = "{{ cesium_token }}";
         if (token && window.Cesium && Cesium.Ion) {
           Cesium.Ion.defaultAccessToken = token;
@@ -240,6 +276,208 @@
           if (show) spinner.classList.add('animate-spin');
           else spinner.classList.remove('animate-spin');
         }
+
+        // Suggestion/autocomplete helpers
+        let suggestToken = 0;
+        let suggestTimeout = null;
+        // Improved suggestion rendering with keyboard navigation and visual polish
+        let activeSuggestionIndex = -1;
+        function clearSuggestions() {
+          const ul = suggestionsBox.querySelector('ul');
+          if (ul) ul.innerHTML = '';
+          activeSuggestionIndex = -1;
+          suggestionsBox.classList.add('hidden');
+          searchBox.removeAttribute('aria-activedescendant');
+        }
+
+        function renderSuggestions(items) {
+          const ul = suggestionsBox.querySelector('ul');
+          if (!ul) return;
+          ul.innerHTML = '';
+          if (!items || items.length === 0) { clearSuggestions(); return; }
+
+          // Only render suggestions with numeric coordinates
+          const usable = items.filter(it => it && Number.isFinite(Number(it.lat)) && Number.isFinite(Number(it.lon)));
+          if (usable.length === 0) { clearSuggestions(); return; }
+
+          usable.slice(0, 8).forEach((it, idx) => {
+            const li = document.createElement('li');
+            li.setAttribute('role', 'option');
+            li.className = 'suggestion-item';
+
+            const left = document.createElement('div');
+            left.className = 'suggestion-left';
+
+            const name = document.createElement('div');
+            name.className = 'suggestion-name';
+            name.textContent = it.name || '';
+
+            const meta = document.createElement('div');
+            meta.className = 'suggestion-meta';
+            const country = it.country ? it.country.toUpperCase() : '';
+            meta.textContent = country || (it.source ? it.source : '');
+
+            left.appendChild(name);
+            left.appendChild(meta);
+
+            const right = document.createElement('div');
+            right.className = 'flex items-center gap-2';
+
+            const badge = document.createElement('span');
+            badge.className = 'suggestion-badge';
+            badge.textContent = it.source ? it.source.replace(/[-_]/g, ' ') : 'server';
+
+            right.appendChild(badge);
+
+            li.appendChild(left);
+            li.appendChild(right);
+
+            // click handler
+            li.addEventListener('click', (ev) => {
+              ev.preventDefault();
+              searchBox.value = it.name || '';
+              clearSuggestions();
+              flyToPlace(it);
+            });
+
+            // mouseover sets active
+            li.addEventListener('mouseenter', () => {
+              setActiveSuggestion(idx);
+            });
+
+            ul.appendChild(li);
+          });
+
+          suggestionsBox.classList.remove('hidden');
+          activeSuggestionIndex = -1;
+        }
+
+        function setActiveSuggestion(i) {
+          const ul = suggestionsBox.querySelector('ul');
+          if (!ul) return;
+          const items = Array.from(ul.children);
+          items.forEach((el, idx) => {
+            el.classList.toggle('active', idx === i);
+            if (idx === i) searchBox.setAttribute('aria-activedescendant', `suggestion-${idx}`);
+            el.id = `suggestion-${idx}`;
+          });
+          activeSuggestionIndex = i;
+        }
+
+        async function fetchSuggestions(q, token) {
+          if (!q) { clearSuggestions(); return; }
+          // show inline spinner inside suggestions area while fetching
+          suggestionsBox.classList.remove('hidden');
+          const ul = suggestionsBox.querySelector('ul');
+          if (ul) ul.innerHTML = `<li class="px-3 py-2 suggestion-item"><div class="suggestion-left"><div class="suggestion-name">Searching...</div><div class="suggestion-meta">Please wait</div></div><div class="suggestion-inline-spinner"><svg class="animate-spin h-4 w-4 text-indigo-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path></svg></div></li>`;
+          // Try Cesium's own geocoder (Ion geocode) first when token present
+          try {
+            if (window.Cesium && Cesium.Ion && Cesium.Ion.defaultAccessToken) {
+              try {
+                const service = new Cesium.IonGeocoderService();
+                const results = await service.geocode(q);
+                // Ensure token matches to avoid race
+                if (token !== suggestToken) return;
+                if (Array.isArray(results) && results.length) {
+                  function extractLatLon(dest) {
+                    if (!dest) return null;
+                    try {
+                      // Cartesian3-like
+                      if (typeof dest.x === 'number' && typeof dest.y === 'number') {
+                        const carto = Cesium.Cartographic.fromCartesian(dest);
+                        return { lat: Cesium.Math.toDegrees(carto.latitude), lon: Cesium.Math.toDegrees(carto.longitude) };
+                      }
+                      // Rectangle-like (west,east,south,north in radians)
+                      if (typeof dest.west === 'number' && typeof dest.east === 'number' && typeof dest.south === 'number' && typeof dest.north === 'number') {
+                        const centerLat = Cesium.Math.toDegrees((dest.north + dest.south) / 2);
+                        const centerLon = Cesium.Math.toDegrees((dest.east + dest.west) / 2);
+                        return { lat: centerLat, lon: centerLon };
+                      }
+                      // If it's an array of positions, try first element
+                      if (Array.isArray(dest) && dest.length > 0) return extractLatLon(dest[0]);
+                      // Some results include a 'center' property
+                      if (dest.center) return extractLatLon(dest.center);
+                    } catch (e) {
+                      return null;
+                    }
+                    return null;
+                  }
+
+                  const mapped = results.slice(0, 8).map(r => {
+                    const coords = extractLatLon(r && r.destination);
+                    return { name: r.displayName || r.name || q, lat: coords ? coords.lat : null, lon: coords ? coords.lon : null, country: null, source: 'cesium-ion' };
+                  }).filter(it => Number.isFinite(Number(it.lat)) && Number.isFinite(Number(it.lon)));
+                  if (mapped.length) { renderSuggestions(mapped); return; }
+                }
+              } catch (e) {
+                // If Cesium Ion geocode fails, fall through to server fallback
+              }
+            }
+          } catch (e) {
+            // ignore and fallback
+          }
+
+      // Fallback to server-side geocoder suggestions
+          try {
+            const r = await fetch(`/api/geocode?q=${encodeURIComponent(q)}&autocomplete=1`);
+            if (!r.ok) { clearSuggestions(); return; }
+            const j = await r.json();
+            if (token !== suggestToken) return;
+            if (j && Array.isArray(j.suggestions)) {
+        renderSuggestions(j.suggestions);
+            } else {
+              clearSuggestions();
+            }
+          } catch (e) { clearSuggestions(); }
+        }
+
+        searchBox.addEventListener('input', (e) => {
+          const q = e.target.value.trim();
+          suggestToken += 1;
+          const tokenNow = suggestToken;
+          if (suggestTimeout) clearTimeout(suggestTimeout);
+          // Debounce 250ms
+          suggestTimeout = setTimeout(() => fetchSuggestions(q, tokenNow), 250);
+        });
+
+        // Keyboard navigation for suggestions
+        searchBox.addEventListener('keydown', (e) => {
+          const ul = suggestionsBox.querySelector('ul');
+          if (!ul || ul.children.length === 0) return;
+          if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            const next = Math.min(activeSuggestionIndex + 1, ul.children.length - 1);
+            setActiveSuggestion(next);
+            return;
+          }
+          if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            const prev = Math.max(activeSuggestionIndex - 1, 0);
+            setActiveSuggestion(prev);
+            return;
+          }
+          if (e.key === 'Enter') {
+            if (activeSuggestionIndex >= 0) {
+              e.preventDefault();
+              const chosen = ul.children[activeSuggestionIndex];
+              if (chosen) chosen.click();
+              // Prevent other Enter handlers from re-running the search
+              e.stopPropagation();
+            }
+            return;
+          }
+          if (e.key === 'Escape') {
+            clearSuggestions();
+            return;
+          }
+        });
+
+        // Click outside to close suggestions
+        document.addEventListener('click', (e) => {
+          if (!e.target.closest('#suggestions') && !e.target.closest('#searchBox')) {
+            clearSuggestions();
+          }
+        });
         
         function showToast(msg, isError = true) {
           const targetToast = isError ? toast : successToast;
@@ -421,43 +659,53 @@
           if (!q) return;
           try {
             showSpinner(true);
-            const r = await fetch(`/api/geocode?q=${encodeURIComponent(q)}`);
-            const geo = await r.json();
-            if (!r.ok) { 
-              showInfoCard(geo.error || 'No results found'); 
-              showToast(geo.error || 'No results found', true); 
-              return; 
+
+            // If q is an object with coordinates (from suggestions), use it directly
+            let lat, lon, displayName;
+            if (typeof q === 'object' && q !== null && q.lat != null && q.lon != null) {
+              lat = Number(q.lat);
+              lon = Number(q.lon);
+              displayName = q.name || '';
+            } else {
+              // Otherwise treat q as a text query and geocode it
+              const r = await fetch(`/api/geocode?q=${encodeURIComponent(String(q))}`);
+              const geo = await r.json();
+              if (!r.ok) {
+                showInfoCard(geo.error || 'No results found');
+                showToast(geo.error || 'No results found', true);
+                return;
+              }
+              lat = geo.lat; lon = geo.lon; displayName = geo.name || String(q);
             }
-            const lat = geo.lat, lon = geo.lon;
+
+            // Validate coordinates
+            if (!Number.isFinite(Number(lat)) || !Number.isFinite(Number(lon))) {
+              showInfoCard('No valid coordinates for this location.');
+              showToast('Invalid location coordinates', true);
+              return;
+            }
             // Mark searched location and fly closer
-            await setMarker(lat, lon, geo.name || q);
-            showToast(`Flying to ${geo.name || q}...`, false);
+            await setMarker(lat, lon, displayName || `${lat.toFixed(2)}, ${lon.toFixed(2)}`);
+            showToast(`Flying to ${displayName || `${lat.toFixed(2)}, ${lon.toFixed(2)}`}...`, false);
             viewer.camera.flyTo({
               destination: Cesium.Cartesian3.fromDegrees(lon, lat, 40000),
               duration: 1.8,
               easingFunction: Cesium.EasingFunction.CUBIC_IN_OUT
             });
+
             // Pre-fetch weather and speak, passing the geocoded name for accuracy
-            const weatherPayload = {
-              lat: lat,
-              lon: lon,
-              search_name: geo.name || q  // Pass the geocoded name to preserve location accuracy
-            };
-            const wr = await fetch('/api/weather', { 
-              method: 'POST', 
-              headers: { 'Content-Type': 'application/json' }, 
-              body: JSON.stringify(weatherPayload) 
-            });
+            const weatherPayload = { lat: lat, lon: lon, search_name: displayName };
+            const wr = await fetch('/api/weather', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(weatherPayload) });
             const data = await wr.json();
-              if (data && !data.error) {
+            if (data && !data.error) {
               // Compute timestamp once to keep UI and TTS identical
               const formattedTimestamp = formatLocalTimestamp(data);
               const text = buildWeatherSpeech(data, lat, lon, formattedTimestamp);
               const formattedInfo = formatWeatherInfo(data, lat, lon, formattedTimestamp);
               showInfoCard(formattedInfo);
-              // No top-right badge
+              // Update marker label
               if (currentPoint) {
-                const lbl = data.name ? `${data.name}${data.country ? ', ' + data.country : ''}` : (geo.name || q);
+                const lbl = data.name ? `${data.name}${data.country ? ', ' + data.country : ''}` : displayName;
                 currentPoint.label.text = lbl;
               }
               // Stop any existing ambient sound before playing new weather

@@ -4,6 +4,8 @@ from flask import Flask, render_template, request, jsonify, send_file
 import requests
 from gtts import gTTS
 from dotenv import load_dotenv
+import tempfile
+import os
 
 load_dotenv()  # Load .env if present
 app = Flask(__name__)
@@ -285,6 +287,8 @@ def api_weather():
 @app.route("/api/geocode", methods=["GET"])
 def api_geocode():
     q = request.args.get("q", "").strip()
+    # If autocomplete param present return multiple suggestions
+    autocomplete = request.args.get("autocomplete", "0").lower() in ("1", "true", "yes")
     if not q:
         return jsonify({"error": "Missing query parameter q"}), 400
     
@@ -307,47 +311,75 @@ def api_geocode():
             if nr.ok:
                 arr = nr.json() or []
                 if arr:
-                    first = arr[0]
-                    try:
-                        lat = float(first.get("lat"))
-                        lon = float(first.get("lon"))
-                    except (TypeError, ValueError):
-                        lat = lon = None
-                    # Build better name from address components
-                    addr = first.get("address", {})
-                    name_parts = []
-                    # Include specific locality details
-                    if addr.get("suburb"):
-                        name_parts.append(addr.get("suburb"))
-                    elif addr.get("neighbourhood"):
-                        name_parts.append(addr.get("neighbourhood"))
-                    elif addr.get("quarter"):
-                        name_parts.append(addr.get("quarter"))
-                    elif first.get("name"):
-                        name_parts.append(first.get("name"))
-                    # Add city
-                    if addr.get("city"):
-                        name_parts.append(addr.get("city"))
-                    elif addr.get("town"):
-                        name_parts.append(addr.get("town"))
-                    # Add state for clarity
-                    if addr.get("state") and len(name_parts) < 3:
-                        name_parts.append(addr.get("state"))
-                    # If still no good name, use display_name with some processing
-                    if not name_parts:
-                        disp = first.get("display_name") or first.get("name") or q
-                        if disp and "," in disp:
-                            parts = [p.strip() for p in disp.split(",")]
-                            name_parts = parts[:3]  # Take first 3 parts
-                    final_name = ", ".join(dict.fromkeys([p for p in name_parts if p])) if name_parts else q
-                    out = {
-                        "name": final_name,
-                        "lat": lat,
-                        "lon": lon,
-                        "country": addr.get("country_code") or addr.get("country"),
-                        "debug_source": "nominatim"
-                    }
-                    return jsonify(out)
+                    # If autocomplete requested, return a list of suggestions
+                    if autocomplete:
+                        suggestions = []
+                        for item in arr[:8]:
+                            try:
+                                lat = float(item.get("lat"))
+                                lon = float(item.get("lon"))
+                            except (TypeError, ValueError):
+                                lat = lon = None
+                            addr = item.get("address", {})
+                            # Build a readable label
+                            parts = []
+                            if addr.get("suburb"):
+                                parts.append(addr.get("suburb"))
+                            elif addr.get("neighbourhood"):
+                                parts.append(addr.get("neighbourhood"))
+                            elif item.get("name"):
+                                parts.append(item.get("name"))
+                            if addr.get("city"):
+                                parts.append(addr.get("city"))
+                            elif addr.get("town"):
+                                parts.append(addr.get("town"))
+                            if addr.get("state"):
+                                parts.append(addr.get("state"))
+                            label = ", ".join(dict.fromkeys([p for p in parts if p])) or (item.get("display_name") or q)
+                            suggestions.append({"name": label, "lat": lat, "lon": lon, "country": addr.get("country_code") or addr.get("country"), "source": "nominatim"})
+                        return jsonify({"suggestions": suggestions})
+                    else:
+                        first = arr[0]
+                        try:
+                            lat = float(first.get("lat"))
+                            lon = float(first.get("lon"))
+                        except (TypeError, ValueError):
+                            lat = lon = None
+                        # Build better name from address components
+                        addr = first.get("address", {})
+                        name_parts = []
+                        # Include specific locality details
+                        if addr.get("suburb"):
+                            name_parts.append(addr.get("suburb"))
+                        elif addr.get("neighbourhood"):
+                            name_parts.append(addr.get("neighbourhood"))
+                        elif addr.get("quarter"):
+                            name_parts.append(addr.get("quarter"))
+                        elif first.get("name"):
+                            name_parts.append(first.get("name"))
+                        # Add city
+                        if addr.get("city"):
+                            name_parts.append(addr.get("city"))
+                        elif addr.get("town"):
+                            name_parts.append(addr.get("town"))
+                        # Add state for clarity
+                        if addr.get("state") and len(name_parts) < 3:
+                            name_parts.append(addr.get("state"))
+                        # If still no good name, use display_name with some processing
+                        if not name_parts:
+                            disp = first.get("display_name") or first.get("name") or q
+                            if disp and "," in disp:
+                                parts = [p.strip() for p in disp.split(",")]
+                                name_parts = parts[:3]  # Take first 3 parts
+                        final_name = ", ".join(dict.fromkeys([p for p in name_parts if p])) if name_parts else q
+                        out = {
+                            "name": final_name,
+                            "lat": lat,
+                            "lon": lon,
+                            "country": addr.get("country_code") or addr.get("country"),
+                            "debug_source": "nominatim"
+                        }
+                        return jsonify(out)
         # Try Open-Meteo forward geocoding if Nominatim didn't work or for non-Indian locations
         url = (
             "https://geocoding-api.open-meteo.com/v1/search"
@@ -358,26 +390,42 @@ def api_geocode():
             data = r.json()
             res = data.get("results") or []
             if res:
-                first = res[0]
-                # Build more accurate location name prioritizing the search query
-                name_parts = []
-                if first.get("name"):
-                    name_parts.append(first.get("name"))
-                if first.get("admin3"):  # More specific admin level (like sector, district)
-                    name_parts.append(first.get("admin3"))
-                elif first.get("admin2"):
-                    name_parts.append(first.get("admin2"))
-                if first.get("admin1") and first.get("admin1") not in name_parts:
-                    name_parts.append(first.get("admin1"))
-                label = ", ".join(dict.fromkeys(name_parts)) if name_parts else first.get("name")
-                out = {
-                    "name": label,
-                    "lat": first.get("latitude"),
-                    "lon": first.get("longitude"),
-                    "country": first.get("country_code") or first.get("country"),
-                    "debug_source": "open-meteo"
-                }
-                return jsonify(out)
+                if autocomplete:
+                    suggestions = []
+                    for first in res[:8]:
+                        name_parts = []
+                        if first.get("name"):
+                            name_parts.append(first.get("name"))
+                        if first.get("admin3"):
+                            name_parts.append(first.get("admin3"))
+                        elif first.get("admin2"):
+                            name_parts.append(first.get("admin2"))
+                        if first.get("admin1") and first.get("admin1") not in name_parts:
+                            name_parts.append(first.get("admin1"))
+                        label = ", ".join(dict.fromkeys(name_parts)) if name_parts else first.get("name")
+                        suggestions.append({"name": label, "lat": first.get("latitude"), "lon": first.get("longitude"), "country": first.get("country_code") or first.get("country"), "source": "open-meteo"})
+                    return jsonify({"suggestions": suggestions})
+                else:
+                    first = res[0]
+                    # Build more accurate location name prioritizing the search query
+                    name_parts = []
+                    if first.get("name"):
+                        name_parts.append(first.get("name"))
+                    if first.get("admin3"):  # More specific admin level (like sector, district)
+                        name_parts.append(first.get("admin3"))
+                    elif first.get("admin2"):
+                        name_parts.append(first.get("admin2"))
+                    if first.get("admin1") and first.get("admin1") not in name_parts:
+                        name_parts.append(first.get("admin1"))
+                    label = ", ".join(dict.fromkeys(name_parts)) if name_parts else first.get("name")
+                    out = {
+                        "name": label,
+                        "lat": first.get("latitude"),
+                        "lon": first.get("longitude"),
+                        "country": first.get("country_code") or first.get("country"),
+                        "debug_source": "open-meteo"
+                    }
+                    return jsonify(out)
         # Final fallback: Nominatim without country restriction
         if not is_indian_specific:
             nom_url = (
@@ -467,7 +515,8 @@ def api_tts():
         print(f"[TTS] Received text: '{text[:50]}' (engine forced to gTTS)")
         # Always use gTTS for concurrency safety
         print("[TTS] Using gTTS engine")
-        tmp_mp3 = "/tmp/out.mp3"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
+            tmp_mp3 = tmp_file.name
         try:
             tts = gTTS(text)
             tts.save(tmp_mp3)
@@ -478,8 +527,12 @@ def api_tts():
             return jsonify({"error": f"gTTS failed: {gtts_exc}"}), 500
         import platform
         plat = platform.system()
+        play_cmd = None
         if plat == "Darwin":
             play_cmd = ["afplay", tmp_mp3]
+        elif plat == "Windows":
+            # Use Windows Media Player in background (minimized, non-blocking)
+            play_cmd = ["cmd", "/c", "start", "/min", "wmplayer", tmp_mp3]
         else:
             from shutil import which
             if which("mpg123"):
@@ -490,12 +543,17 @@ def api_tts():
         try:
             subprocess.Popen(play_cmd)
         except Exception as play_exc:
-            import traceback
             print(f"[TTS] Playback failed: {play_exc}\n{traceback.format_exc()}")
-            return jsonify({"error": f"TTS generated but playback failed: {play_exc}"}), 500
+            # Fallback: try playsound if available
+            try:
+                from playsound import playsound
+                playsound(tmp_mp3)
+                return jsonify({"status": "playing (playsound fallback)", "engine": "gtts"})
+            except Exception as ps_exc:
+                print(f"[TTS] playsound fallback failed: {ps_exc}\n{traceback.format_exc()}")
+                return jsonify({"error": f"TTS generated but playback failed: {play_exc}; playsound fallback failed: {ps_exc}"}), 500
         return jsonify({"status": "playing", "engine": "gtts"})
     except Exception as e:
-        import traceback
         print(f"[TTS] Exception: {e}\n{traceback.format_exc()}")
         return jsonify({"error": str(e)}), 500
 
