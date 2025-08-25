@@ -644,9 +644,12 @@
               const lbl = data.name ? `${data.name}${data.country ? ', ' + data.country : ''}` : `${lat.toFixed(2)}, ${lon.toFixed(2)}`;
               currentPoint.label.text = lbl;
             }
-            // Stop any existing ambient sound before playing new weather
+            // Stop any existing ambient sound before playing new weather,
+            // then run TTS and request ambient playback for the reported weather.
             stopAmbientAudio();
             await playTTS(text, data.weather);
+            // Kick off ambient sound on the backend (best-effort)
+            playAmbientAudio(data.weather);
           } catch (e) {
             showInfoCard(`Error: ${e}`);
             showToast('Failed to fetch weather', true);
@@ -708,9 +711,11 @@
                 const lbl = data.name ? `${data.name}${data.country ? ', ' + data.country : ''}` : displayName;
                 currentPoint.label.text = lbl;
               }
-              // Stop any existing ambient sound before playing new weather
+              // Stop any existing ambient sound before playing new weather,
+              // then speak and start ambient audio to match the condition.
               stopAmbientAudio();
               await playTTS(text, data.weather);
+              playAmbientAudio(data.weather);
             }
           } catch (e) {
             showInfoCard(`Error: ${e}`);
@@ -835,13 +840,51 @@
         
   // playAmbientWeatherSound removed (backend ambient API used directly elsewhere)
         
-        function stopAmbientAudio() {
-          // Call backend to stop ambient sound on Pi
-          fetch('/api/ambient', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'stop' })
-          }).catch(() => {});
+        async function stopAmbientAudio() {
+          // Call backend to stop ambient sound on Pi and show feedback
+          try {
+            const resp = await fetch('/api/ambient', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ action: 'stop' })
+            });
+            const j = await resp.json().catch(() => ({}));
+            if (resp.ok && !j.error) {
+              showToast('Ambient sound stopped', false);
+            } else {
+              showToast((j && j.error) || 'Failed to stop ambient sound', true);
+            }
+          } catch (e) {
+            // best-effort, don't interrupt UI flow
+            showToast('Ambient stop request failed', true);
+          }
+        }
+
+        // Ask the backend to play ambient sound matching the current weather.
+        // This calls the /api/ambient endpoint with action='play' and the
+        // weather description string returned from /api/weather.
+        // Play ambient sound on the server/device only (no browser playback)
+        async function playAmbientAudio(weather) {
+          try {
+            if (!weather) return;
+            const payload = { weather: String(weather), action: 'play' };
+            const resp = await fetch('/api/ambient', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload)
+            });
+            const j = await resp.json().catch(() => ({}));
+            if (resp.ok && !j.error) {
+              const soundType = (j.sound_type || j.sound || j.weather || '').toString();
+              const label = soundType ? soundType : String(weather);
+              showToast(`🎧 Playing ambient: ${label}`, false);
+            } else {
+              showToast((j && j.error) || 'Ambient playback failed', true);
+            }
+          } catch (e) {
+            console.error('playAmbientAudio error', e);
+            showToast('Ambient request error', true);
+          }
         }
 
         async function playTTS(text, weatherCondition) {

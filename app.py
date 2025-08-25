@@ -5,13 +5,41 @@ import requests
 from gtts import gTTS
 from dotenv import load_dotenv
 import tempfile
-import os
+import threading
+import time
 
 load_dotenv()  # Load .env if present
 app = Flask(__name__)
 
 OPENWEATHER_API_KEY = os.environ.get("OPENWEATHER_API_KEY", "")
 CESIUM_ION_TOKEN = os.environ.get("CESIUM_ION_TOKEN", "")
+
+# Periodically or at startup clean up stale TTS temporary files to avoid filling disk.
+def _cleanup_old_tts(tmp_dir=None, older_than_seconds=60*60):
+    try:
+        td = tmp_dir or tempfile.gettempdir()
+        now = time.time()
+        for fname in os.listdir(td):
+            if not fname.lower().endswith('.mp3'):
+                continue
+            # Heuristic: project temp files created via NamedTemporaryFile will have tmp prefix
+            if not fname.startswith('tmp') and 'tmp' not in fname:
+                continue
+            path = os.path.join(td, fname)
+            try:
+                mtime = os.path.getmtime(path)
+                if now - mtime > older_than_seconds:
+                    os.remove(path)
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+# Run cleanup at startup in a background thread (non-blocking)
+try:
+    threading.Thread(target=_cleanup_old_tts, kwargs={}, daemon=True).start()
+except Exception:
+    pass
 
 @app.route("/")
 def index():
@@ -524,7 +552,14 @@ def api_tts():
         except Exception as gtts_exc:
             import traceback
             print(f"[TTS] gTTS failed: {gtts_exc}\n{traceback.format_exc()}")
+            # Clean up the file if partially written
+            try:
+                if os.path.exists(tmp_mp3):
+                    os.remove(tmp_mp3)
+            except Exception:
+                pass
             return jsonify({"error": f"gTTS failed: {gtts_exc}"}), 500
+
         import platform
         plat = platform.system()
         play_cmd = None
@@ -541,19 +576,34 @@ def api_tts():
                 play_cmd = ["aplay", tmp_mp3]
         print(f"[TTS] Playing with: {play_cmd}")
         try:
+            # Start playback in background
             subprocess.Popen(play_cmd)
+            # Schedule file removal later to avoid disk filling
+            def _schedule_delete(path, delay=120):
+                try:
+                    time.sleep(delay)
+                    if os.path.exists(path):
+                        try:
+                            os.remove(path)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            try:
+                threading.Thread(target=_schedule_delete, args=(tmp_mp3, 120), daemon=True).start()
+            except Exception:
+                pass
         except Exception as play_exc:
             print(f"[TTS] Playback failed: {play_exc}\n{traceback.format_exc()}")
-            # Fallback: try playsound if available
+            # Clean up the file immediately if playback couldn't be started
             try:
-                from playsound import playsound
-                playsound(tmp_mp3)
-                return jsonify({"status": "playing (playsound fallback)", "engine": "gtts"})
-            except Exception as ps_exc:
-                print(f"[TTS] playsound fallback failed: {ps_exc}\n{traceback.format_exc()}")
-                return jsonify({"error": f"TTS generated but playback failed: {play_exc}; playsound fallback failed: {ps_exc}"}), 500
+                if os.path.exists(tmp_mp3):
+                    os.remove(tmp_mp3)
+            except Exception:
+                pass
         return jsonify({"status": "playing", "engine": "gtts"})
     except Exception as e:
+        import traceback
         print(f"[TTS] Exception: {e}\n{traceback.format_exc()}")
         return jsonify({"error": str(e)}), 500
 
@@ -567,93 +617,91 @@ def api_ambient():
     - ambient.(wav|mp3) as a fallback
     """
     data = request.get_json(force=True)
-    weather_condition = data.get("weather", "").lower()
-    action = data.get("action", "play")  # play or stop 
+    weather_condition = (data.get("weather") or "").lower()
+    action = data.get("action", "play")  # play or stop
+    # optional intensity (precipitation mm/h) to prefer heavier sounds
+    intensity = None
+    try:
+        if data.get('precip_mm') is not None:
+            intensity = float(data.get('precip_mm'))
+        elif data.get('intensity') is not None:
+            intensity = float(data.get('intensity'))
+    except Exception:
+        intensity = None
     
+    print(f"[Ambient] Action: {action}, Weather: '{weather_condition}'")
+
+    # Handle stop immediately
     if action == "stop":
-        # Stop any existing ambient sound
         try:
             import subprocess
             # Kill shell loops and players referencing our static ambient folder
-            patterns = [
-                "static/audio/ambient",  # matches our file path in the command
-            ]
+            patterns = ["static/audio/ambient"]
             for p in patterns:
                 subprocess.run(["pkill", "-f", p], check=False)
-            # Also try killing common players to be safe
             for p in ("afplay", "aplay", "mpg123"):
                 subprocess.run(["pkill", p], check=False)
             return jsonify({"status": "stopped"})
         except Exception as e:
             return jsonify({"error": str(e)}), 500
-    
-    # Map weather conditions to sound types
+
+    # Map and adjust sound type
     sound_type = _get_weather_sound_type(weather_condition)
-    
+    if intensity is not None:
+        try:
+            if intensity > 10 and sound_type == 'rain':
+                sound_type = 'storm'
+            elif intensity > 2 and sound_type == 'ambient':
+                sound_type = 'rain'
+        except Exception:
+            pass
+
     try:
-        # Resolve static directory and select a suitable file (wav/mp3)
         ambient_dir = os.path.join(app.root_path, "static", "audio", "ambient")
-        base_candidates = [f"{sound_type}", "ambient"]
-        # Platform-specific supported formats
+        base_candidates = [sound_type, "ambient"]
         import platform
         is_mac = platform.system() == "Darwin"
-        # afplay supports wav and mp3; aplay typically supports wav only
-        preferred_exts = [".wav", ".mp3"] if is_mac else [".wav", ".mp3"]
+        preferred_exts = [".wav", ".mp3"]
 
         selected_path = None
         selected_ext = None
+        selected_name = None
         for name in base_candidates:
             for ext in preferred_exts:
                 candidate = os.path.join(ambient_dir, name + ext)
                 if os.path.exists(candidate):
                     selected_path = candidate
                     selected_ext = ext
+                    selected_name = name + ext
                     break
             if selected_path:
                 break
 
         if not selected_path:
             return jsonify({"error": f"No audio file found for '{sound_type}'. Place files in static/audio/ambient."}), 404
-        
+
         static_audio_path = selected_path
-    # Debug logging removed
-        
+
         # Stop any existing ambient sound first
         import subprocess
         subprocess.run(["pkill", "-f", "ambient_weather"], check=False)
         subprocess.run(["pkill", "-f", "static/audio/ambient"], check=False)
-        
-        # Play the ambient sound in background on Pi using system command
-        # Build playback command based on platform and file type
+
+        # Build playback command
+        play_cmd = None
         if is_mac:
-            # afplay supports wav/mp3
-            play_cmd = [
-                "sh", "-c",
-                f"while true; do afplay '{static_audio_path}'; sleep 0.25; done"
-            ]
+            play_cmd = ["sh", "-c", f"while true; do afplay '{static_audio_path}'; sleep 0.25; done"]
         else:
-            # On Linux/Pi prefer WAV via aplay, else MP3 via mpg123 if available
+            # Prefer wav via aplay, else mpg123 for mp3
             if selected_ext == ".wav":
-                play_cmd = [
-                    "sh", "-c",
-                    f"while true; do aplay -q '{static_audio_path}'; sleep 0.25; done"
-                ]
+                play_cmd = ["sh", "-c", f"while true; do aplay -q '{static_audio_path}'; sleep 0.25; done"]
             elif selected_ext == ".mp3":
-                # Check if mpg123 exists; if not, return a helpful error
                 from shutil import which
                 if which("mpg123"):
-                    play_cmd = [
-                        "sh", "-c",
-                        f"while true; do mpg123 -q '{static_audio_path}'; sleep 0.25; done"
-                    ]
+                    play_cmd = ["sh", "-c", f"while true; do mpg123 -q '{static_audio_path}'; sleep 0.25; done"]
                 else:
-                    return jsonify({
-                        "error": "MP3 playback not available on Linux. Install 'mpg123' or provide a WAV file.",
-                        "file": static_audio_path
-                    }), 415
-        
-    # Debug logging removed
-        
+                    return jsonify({"error": "MP3 playback not available on platform. Install 'mpg123' or provide a WAV file."}), 415
+
         # Start the process in background
         process = subprocess.Popen(
             play_cmd,
@@ -661,49 +709,102 @@ def api_ambient():
             stderr=subprocess.PIPE,
             preexec_fn=os.setsid if hasattr(os, 'setsid') else None
         )
-        # Wait briefly to see if it starts successfully
-        import time
+        # Wait briefly to ensure it started
         time.sleep(0.5)
         poll_result = process.poll()
         if poll_result is not None:
-            # Process already terminated, get error output
             stdout, stderr = process.communicate()
             error_msg = f"Audio process failed: stdout={stdout.decode()}, stderr={stderr.decode()}"
-            return jsonify({"error": error_msg, "file": static_audio_path}), 500
+            return jsonify({"error": error_msg}), 500
+
         return jsonify({
             "status": "playing",
             "sound_type": sound_type,
             "weather": weather_condition,
             "pid": process.pid,
-            "file": static_audio_path,
-            "command": " ".join(play_cmd)
+            "command": " ".join(play_cmd),
         })
-        
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 def _get_weather_sound_type(weather):
     """Map weather condition to ambient sound type"""
-    if not weather:
+    # Accept several input shapes: numeric WMO / OpenWeather id, dict, or string
+    if weather is None:
         return "ambient"
-    
-    w = weather.lower()
-    if "rain" in w or "drizzle" in w or "shower" in w:
-        return "rain"
-    elif "storm" in w or "thunder" in w:
+
+    # If a dict-like object is passed, try to extract useful fields
+    try:
+        if isinstance(weather, dict):
+            # Try common keys used by OpenWeather/Open-Meteo
+            if "id" in weather:
+                try:
+                    weather = int(weather.get("id"))
+                except Exception:
+                    weather = weather.get("description") or weather.get("weather") or ""
+            elif "weather_code" in weather or "code" in weather:
+                try:
+                    weather = int(weather.get("weather_code") or weather.get("code"))
+                except Exception:
+                    weather = weather.get("description") or weather.get("weather") or ""
+            else:
+                weather = weather.get("description") or weather.get("weather") or ""
+    except Exception:
+        # Fall back to string handling below
+        weather = str(weather)
+
+    # If numeric code provided, map by known ranges (OpenWeather ids and WMO codes)
+    try:
+        code = int(weather)
+        # OpenWeather thunderstorm range and Open-Meteo thunderstorm codes
+        if 200 <= code <= 232 or 95 <= code <= 99:
+            return "storm"
+        # Drizzle
+        if 300 <= code <= 321 or 51 <= code <= 57:
+            return "rain"
+        # Rain
+        if 500 <= code <= 531 or 61 <= code <= 67 or 80 <= code <= 82:
+            return "rain"
+        # Snow
+        if 600 <= code <= 622 or 71 <= code <= 77 or 85 <= code <= 86:
+            return "snow"
+        # Atmosphere / fog-like
+        if 701 <= code <= 762 or code in (45, 48):
+            return "fog"
+        # Clear
+        if code == 0 or code == 800:
+            return "sunny"
+        # Clouds (OpenWeather 801-804, Open-Meteo 1-3)
+        if (801 <= code <= 804) or (1 <= code <= 3):
+            return "cloudy"
+    except Exception:
+        pass
+
+    # Textual matching (lowercase)
+    w = str(weather).lower()
+    if not w.strip():
+        return "ambient"
+
+    # Priority checks
+    if "thunder" in w or "storm" in w or "tornado" in w:
         return "storm"
-    elif "snow" in w or "blizzard" in w:
+    if "hail" in w:
+        return "storm"
+    if "rain" in w or "drizzle" in w or "shower" in w or "precipitation" in w:
+        return "rain"
+    if "snow" in w or "sleet" in w or "blizzard" in w:
         return "snow"
-    elif "wind" in w or "breezy" in w:
-        return "wind"
-    elif "fog" in w or "mist" in w:
+    if "fog" in w or "mist" in w or "haze" in w or "smoke" in w or "dust" in w:
         return "fog"
-    elif "clear" in w or "sunny" in w:
+    if "wind" in w or "breezy" in w or "gust" in w:
+        return "wind"
+    if "clear" in w or "sunny" in w:
         return "sunny"
-    elif "cloud" in w or "overcast" in w:
+    if "cloud" in w or "overcast" in w or "broken" in w or "scattered" in w:
         return "cloudy"
-    
+
     return "ambient"
 
 
